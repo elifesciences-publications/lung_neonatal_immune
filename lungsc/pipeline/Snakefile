@@ -1,0 +1,179 @@
+# vim: fdm=indent
+'''
+author:     Fabio Zanini
+date:       26/04/19
+content:    Snakemake for single cell RNA-Seq of neonatal lung
+'''
+localrules: all
+
+import os
+import glob
+import numpy as np
+import pandas as pd
+
+root_fdn = '/oak/stanford/groups/quake/fzanini/sequencing_data/lung_development/'
+genome_fdn = root_fdn+'genome/Musmusculus_ercc_index'
+gtf_fn = root_fdn+'genome/Mus_musculus.GRCm38.91.ercc.velocity_sorted.gtf'
+gtf_fn_velocity = root_fdn+'genome/redo/Mus_musculus.GRCm38.91.gtf'
+fastq_foldername = root_fdn+'fastq/'
+bam_foldername = root_fdn+'bamfiles/'
+htseq_foldername = root_fdn+'htseq/'
+
+
+# Sample table
+sampletable = pd.read_csv(root_fdn+"samplesheet.tsv", sep='\t', index_col=0)
+sampletable['samplename'] = sampletable.index
+
+
+# Select which sequencing runs to include
+novaseq_runs = config['dcs'].split('_')
+sampletable = sampletable.loc[sampletable['DC'].isin(novaseq_runs)]
+
+
+def get_sample_fastqfilenames(w):
+    dc, bn = w['dc'], w['bn']
+    idx = sampletable.loc[sampletable['bam'] == dc+'/'+bn].index
+    if len(idx) != 1:
+        raise IOError('Problems finding BAM files in the sampletable')
+    idx = idx[0]
+    fdn = fastq_foldername+'{:}/'.format(sampletable.at[idx, 'fastq'])
+    fns = [None, None]
+    for fn in os.listdir(fdn):
+        if '_R1_' in fn:
+            fns[0] = fdn+fn
+        elif '_R2_' in fn:
+            fns[1] = fdn+fn
+    if (fns[0] is None) or (fns[1] is None):
+        raise IOError('One or more fastq file not found: {:}, {:}'.format(dc, sn))
+    return fns
+
+
+def get_sample_bamfilenames(bam_foldername):
+    fns = []
+    for dc in novaseq_runs:
+        for fdn in os.listdir(bam_foldername+'DC{:}'.format(dc)):
+            fns.append(bam_foldername+'DC{:}/{:}/Aligned.out.bam'.format(dc, fdn))
+    return fns
+
+
+def merge_htseq(fns, fn_out):
+    import numpy as np
+
+    # Get samplenames
+    sns = []
+    for fn in fns:
+    	with open(fn, 'rt') as f:
+            for x in f.readline().rstrip('\n').split(' '):
+                bn = x.split('/')[-3]
+                sn = x.split('/')[-2]
+                sns.append(sn)
+    n = len(sns)
+
+    # Get gene names
+    with open(fns[0], 'rt') as f:
+        f.readline()
+        gns = [line.split('\t')[0] for line in f]
+    l = len(gns)
+
+    with open(fn_out, 'wt') as fout:
+        # Header
+        fout.write('\t'.join(['EnsemblID'] + sns)+'\n')
+
+        # Write by blocks
+        il = 0
+        lb = 1000
+        mat = np.zeros((lb, n), dtype='U10')
+        while il < l:
+            ni = 0
+            for fn in fns:
+                with open(fn, 'rt') as fi:
+                    fi.readline()
+                    for ili, line in enumerate(fi):
+                        if ili < il:
+                            continue
+                        if ili >= il + lb:
+                            break
+                        ncol = line.count('\t')
+                        mat[ili % lb, ni: ni + ncol] = line.rstrip('\n').split('\t')[1:]
+                ni += ncol
+            if il + lb > l:
+                mat = mat[:l - il]
+            for ir, row in enumerate(mat):
+                fout.write('\t'.join([gns[il + ir]] + [str(x) for x in row])+'\n')
+            il += lb
+
+
+# RULES
+rule all:
+    input:
+        htseq = htseq_foldername+'LungDevelopment.tsv'
+
+
+rule star:
+    input: get_sample_fastqfilenames
+    output:
+        aligned = bam_foldername+'{dc}/{bn}/Aligned.out.bam'
+    threads: 6
+    params:
+        name = "S{dc}{bn}",
+        mem = "32000",
+        time = "12:0:0",
+        output_folder = bam_foldername+'{dc}/{bn}/',
+        log = "/oak/stanford/groups/quake/fzanini/postdoc/lung_development/lungsc/pipeline/log/snakemake_star_{dc}{bn}.log"
+    shell:
+        """
+        STAR \
+        --runThreadN {threads} \
+        --runMode alignReads \
+        --genomeDir {genome_fdn} \
+        --readFilesIn {input} \
+        --readFilesCommand zcat \
+        --outFilterType BySJout \
+        --outFilterMultimapNmax 20 \
+        --alignSJoverhangMin 8 \
+        --alignSJDBoverhangMin 1 \
+        --outFilterMismatchNmax 999 \
+        --outFilterMismatchNoverLmax 0.04 \
+        --alignIntronMin 20 \
+        --alignIntronMax 1000000 \
+        --alignMatesGapMax 1000000 \
+        --outSAMstrandField intronMotif \
+        --outFileNamePrefix {params.output_folder} \
+        --outSAMtype BAM Unsorted \
+        --outSAMattributes NH HI AS NM MD \
+        --outFilterMatchNminOverLread 0.4 \
+        --outFilterScoreMinOverLread 0.4 \
+        --clip3pAdapterSeq CTGTCTCTTATACACATCT \
+        --outReadsUnmapped Fastx
+        """
+
+rule htseq:
+    input: lambda w: bam_foldername+sampletable.at[w['sn'], 'bam']+'/Aligned.out.bam'
+    output: root_fdn+'htseq/{dc}/htseq_{sn}.tsv'
+    params:
+        name = "h{dc}{sn}",
+        mem = "8000",
+        time = "1-0:0:0",
+        log = "/oak/stanford/groups/quake/fzanini/postdoc/lung_development/lungsc/pipeline/log/snakemake_htseq_{dc}_{sn}.log"
+    shell:
+        """
+        echo {input} > {output}
+        htseq-count \
+        --format bam \
+        --mode intersection-nonempty \
+        --stranded no \
+        --secondary-alignments ignore \
+        --supplementary-alignments ignore \
+        {input} {gtf_fn} >> {output}
+        """
+
+rule merge_htseq:
+    input: list(htseq_foldername + sampletable['DC'] + '/htseq_' + sampletable.index + '.tsv')
+    output: htseq_foldername+'LungDevelopment.tsv'
+    params:
+        name = "merge_htseq",
+        mem = "8000",
+        time = "1-0:0:0",
+        log = "/oak/stanford/groups/quake/fzanini/postdoc/lung_development/lungsc/log/snakemake_merge_htseq.log"
+    run:
+        merge_htseq(input, output[0])
