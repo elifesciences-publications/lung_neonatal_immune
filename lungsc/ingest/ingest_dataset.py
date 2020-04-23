@@ -418,12 +418,18 @@ if __name__ == '__main__':
             ind2 = dsl.ca['doublet'] == 0
             ind3 = dsl.ca['cellSubtype'] != ''
 
+            n_genes = (dsl[:, :] > 0).sum(axis=0)
+            n_genes_stats = np.percentile(n_genes, [25, 50, 75])
+
             N_immune = (ind).sum()
             N_immune_nodoublet = (ind & ind2).sum()
         stats['n_genes_filtered'] = L
         stats['n_cells_filtered'] = N
         stats['n_cells_filtered_immune'] = N_immune
         stats['n_cells_filtered_immune_nodoublet'] = N_immune_nodoublet
+        stats['n_genes_25percentile'] = n_genes_stats[0]
+        stats['n_genes_median'] = n_genes_stats[1]
+        stats['n_genes_75percentile'] = n_genes_stats[2]
 
         print('Data ingestion and filtering statistics:')
         for key, value in stats.items():
@@ -440,4 +446,8 @@ if __name__ == '__main__':
         #n_cells_filtered:                                      11656
         #n_cells_filtered_immune:                                4199
         #n_cells_filtered_immune_nodoublet:                      4052
+        #n_genes_25percentile:                                   2725
+        #n_genes_median:                                         4108
+        #n_genes_75percentile:                                   5516
+
 
