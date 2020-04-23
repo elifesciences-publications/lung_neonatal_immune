@@ -18,6 +18,12 @@ from singlet import Dataset, CountsTable, FeatureSheet, SampleSheet
 versions = ('20190325', '20190513', '20190620', '20190828')
 
 
+# Global parameters
+min_coverage = 50000
+min_expression_nreads = 5
+min_expressing_cells = 10
+
+
 # Some genes we just want them no matter what
 safe_genes = [
         'Mcpt4',
@@ -91,11 +97,16 @@ def make_samplesheet(cellnames):
 if __name__ == '__main__':
 
     version = versions[-1]
-    pa = argparse.ArgumentParser(
+    pa = argparse.ArgumentParser()
+    pa.add_argument(
             '--block',
             type=int,
-            choices=[1, 2, 3],
+            choices=[1, 2, 3, 4],
             required=True,
+            )
+    pa.add_argument(
+            '--dry',
+            action='store_true',
             )
     args = pa.parse_args()
 
@@ -109,7 +120,9 @@ if __name__ == '__main__':
             cellnames = f.readline().rstrip('\n').split('\t')[1:]
         samplesheet = make_samplesheet(cellnames)
         fn_ss = '../../data/sequencing/datasets/all_{:}/samplesheet.tsv'.format(version)
-        samplesheet.to_csv(fn_ss, sep='\t', index=True)
+
+        if not args.dry:
+            samplesheet.to_csv(fn_ss, sep='\t', index=True)
 
         print('Load counts')
         fn_co = '../../data/sequencing/datasets/all_{:}/counts.tsv'.format(version)
@@ -165,13 +178,17 @@ if __name__ == '__main__':
 
         print('Save raw dataset as loom file')
         fn_raw = '../../data/sequencing/datasets/all_{:}/raw.loom'.format(version)
-        ds.to_dataset_file(fn_raw, fmt='loom')
+
+        if not args.dry:
+            ds.to_dataset_file(fn_raw, fmt='loom')
 
     # BLOCK 2: filter genes and cells
     if args.block == 2:
         print('Load raw loom file')
         import loompy
         fn_raw = '../../data/sequencing/datasets/all_{:}/raw.loom'.format(version)
+
+        # We have to do it this way to save memory
         with loompy.connect(fn_raw) as dsl:
 
             print('Load samplesheet')
@@ -228,7 +245,7 @@ if __name__ == '__main__':
             #dsl.ca['number_of_genes_1plusreads'] = ngenes1p
 
             print('Select decently expressing cells')
-            good_cells = samplesheet['coverage'] >= 50000
+            good_cells = samplesheet['coverage'] >= min_coverage
             good_cells &= samplesheet['number_of_genes_1plusreads'] >= 400
             good_cells = good_cells.index[good_cells]
             print('Number of decent cells: {:}'.format(len(good_cells)))
@@ -253,9 +270,9 @@ if __name__ == '__main__':
                 indi = good_cells_ind[(good_cells_ind >= ist) & (good_cells_ind < ien)] - ist
                 submat = submat[:, indi]
                 # NOTE: this is expression before normalization (raw reads)
-                ncellsexp += (submat >= 5).sum(axis=1)
+                ncellsexp += (submat >= min_expression_nreads).sum(axis=1)
             print()
-            good_genes = pd.Series(ind_mapped & (ncellsexp >= 10), index=features)
+            good_genes = pd.Series(ind_mapped & (ncellsexp >= min_expressing_cells), index=features)
             good_genes[featuresheet['GeneName'].isin(safe_genes)] = True
             good_genes = features[good_genes]
             print('Number of decent genes: {:}'.format(len(good_genes)))
@@ -327,12 +344,14 @@ if __name__ == '__main__':
             else:
                 colnew = col
             row_attrs[colnew] = featuresheet_good[col].values
-        loompy.create(
-            fn_good,
-            layers={'': matrix},
-            row_attrs=row_attrs,
-            col_attrs=col_attrs,
-            )
+
+        if not args.dry:
+            loompy.create(
+                fn_good,
+                layers={'': matrix},
+                row_attrs=row_attrs,
+                col_attrs=col_attrs,
+                )
 
     # BLOCK 3: check that it all worked
     if args.block == 3:
@@ -374,3 +393,51 @@ if __name__ == '__main__':
                 featuresheet=featuresheet,
                 samplesheet=samplesheet,
                 )
+
+    # BLOCK 4: collect stats on the process
+    if args.block == 4:
+        print('Load filtered loom file')
+        import loompy
+
+        stats = {
+            'min_coverage': min_coverage,
+            'min_expression_nreads': min_expression_nreads,
+            'min_expressing_cells': min_expressing_cells,
+            }
+
+        fn_raw = '../../data/sequencing/datasets/all_{:}/raw.loom'.format(version)
+        with loompy.connect(fn_raw) as dsl:
+            L, N = dsl.shape
+        stats['n_genes_raw'] = L
+        stats['n_cells_raw'] = N
+
+        fn_good = '../../data/sequencing/datasets/all_{:}/good.loom'.format(version)
+        with loompy.connect(fn_good) as dsl:
+            L, N = dsl.shape
+            ind = dsl.ca['cellType'] == 'immune'
+            ind2 = dsl.ca['doublet'] == 0
+            ind3 = dsl.ca['cellSubtype'] != ''
+
+            N_immune = (ind).sum()
+            N_immune_nodoublet = (ind & ind2).sum()
+        stats['n_genes_filtered'] = L
+        stats['n_cells_filtered'] = N
+        stats['n_cells_filtered_immune'] = N_immune
+        stats['n_cells_filtered_immune_nodoublet'] = N_immune_nodoublet
+
+        print('Data ingestion and filtering statistics:')
+        for key, value in stats.items():
+            print('{:35}\t{:20}'.format(key+':', value))
+
+        # RESULT:
+        #Data ingestion and filtering statistics:
+        #min_coverage:                                          50000
+        #min_expression_nreads:                                     5
+        #min_expressing_cells:                                     10
+        #n_genes_raw:                                           53553
+        #n_cells_raw:                                           14656
+        #n_genes_filtered:                                      26317
+        #n_cells_filtered:                                      11656
+        #n_cells_filtered_immune:                                4199
+        #n_cells_filtered_immune_nodoublet:                      4052
+
