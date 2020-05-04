@@ -29,359 +29,410 @@ if __name__ == '__main__':
     ds0 = DatasetLung.load(preprocess=True, version=versions[-1])
     ds0.query_samples_by_metadata(
         '(cellType == "immune") & (doublet == 0)', inplace=True)
-
-    print('Dendritic cells')
     ds = ds0.query_samples_by_metadata(
-        'cellSubtype in ("DC I", "DC II", "DC III")',
+        'cellSubtype == "Mac V"',
         )
 
-    print('Load tSNE from file')
-    vs = pd.read_csv(
-        '../../data/sequencing/datasets/all_20190828/tsne_immune.tsv',
-        sep='\t',
-        index_col=0,
-        )
-    vs = vs.loc[ds.samplenames]
-
-    if True:
-        print('Plot tSNE with clusters')
-        gene, title = ('cellSubtype', 'subtype')
-        ln = ds.samplesheet[gene].str.len().max()
-
-        fig, ax = plt.subplots(figsize=(2 + 0.07 * ln, 2))
-        cmap = {
-            'DC I': 'darkviolet',
-            'DC II': 'violet',
-            'DC III': 'fuchsia',
-        }
-        ds.plot.scatter_reduced_samples(
-                vs,
-                ax=ax,
-                s=12,
-                alpha=0.40,
-                cmap=cmap,
-                color_by=gene,
-                color_log=False,
+    # See other script for pseudotiming
+    fn_pt = '../../data/sequencing/datasets/all_{:}/macV_pseudotime.tsv'.format(versions[-1])
+    fn_tsne = '../../data/sequencing/datasets/all_{:}/macV_tsne.tsv'.format(versions[-1])
+    if not os.path.isfile(fn_pt):
+        print('Feature selection')
+        features = ds.feature_selection.overdispersed_within_groups(
+                'Mousename',
+                n_features=500,
+                inplace=False,
                 )
+        dsf = ds.query_features_by_name(features)
 
-        d = ax._singlet_cmap
-        handles = []
-        labels = []
-        for key, color in d.items():
-            h = mlines.Line2D(
-                [], [], color=color, marker='o', lw=0,
-                markersize=5,
-                )
-            handles.append(h)
-            if gene == 'Treatment':
-                key = key[0]
-            labels.append(key.upper())
-        ncol = 1
-        fontsize = 8
-        ax.legend(
-            handles, labels, loc='upper left', fontsize=fontsize, ncol=ncol,
-            bbox_to_anchor=(1.01, 1.01),
-            bbox_transform=ax.transAxes,
+        print('PCA')
+        dsc = dsf.dimensionality.pca(
+            n_dims=25,
+            robust=False,
+            return_dataset='samples',
             )
 
-        ax.grid(False)
-        ax.set_axis_off()
-        fig.tight_layout()
+        print('tSNE')
+        vs = dsc.dimensionality.tsne(perplexity=20)
 
-    if False:
-        for ext in ['svg', 'pdf', ['png', 600]]:
-            if isinstance(ext, list):
-                ext, dpi = ext
-                fig.savefig(fig_fdn+'immune_tsne_clusters.{:}'.format(
-                    ext),
-                    dpi=dpi)
-            else:
-                fig.savefig(fig_fdn+'immune_tsne_clusters.{:}'.format(
-                    ext))
-
-    if True:
-        print('Plot timepoints')
-        gene, title = 'Timepoint', 'timepoint'
-        ln = ds.samplesheet[gene].str.len().max()
-
-        fig, ax = plt.subplots(figsize=(2 + 0.07 * ln, 2))
-        cmap = {
-            'E18.5': 'navy',
-            'P1': 'gold',
-            'P7': 'tomato',
-            'P21': 'firebrick',
-            }
-        ds.plot.scatter_reduced_samples(
-                vs,
-                ax=ax,
-                s=12,
-                alpha=0.40,
-                cmap=cmap,
-                color_by=gene,
-                color_log=False,
-                )
-
-        d = ax._singlet_cmap
-        handles = []
-        labels = []
-        for key, color in d.items():
-            h = mlines.Line2D(
-                [], [], color=color, marker='o', lw=0,
-                markersize=5,
-                )
-            handles.append(h)
-            if gene == 'Treatment':
-                key = key[0]
-            labels.append(key.upper())
-        labels_old = list(labels)
-        labels = ['E18.5', 'P1', 'P7', 'P21']
-        handles = [handles[labels_old.index(li)] for li in labels]
-        ncol = 1
-        fontsize = 8
-        ax.legend(
-            handles, labels, loc='upper left', fontsize=fontsize, ncol=ncol,
-            bbox_to_anchor=(1.01, 1.01),
-            bbox_transform=ax.transAxes,
+        print('Convert to AnnData')
+        adata = anndata.AnnData(
+            dsc.counts.T,
+            obs=dsc.samplesheet,
+            var=dsc.featuresheet,
             )
 
-        ax.grid(False)
-        ax.set_axis_off()
-        fig.tight_layout()
+        print('Flip the tSNE if necessary')
+        if vs.loc[ds.samplesheet['Timepoint'] == 'E18.5'].mean(axis=0)['dimension 1'] > 0:
+            vs['dimension 1'] = -vs['dimension 1']
+        if vs.loc[ds.samplesheet['Timepoint'] == 'E18.5'].mean(axis=0)['dimension 2'] < 0:
+            vs['dimension 2'] = -vs['dimension 2']
 
-    if False:
-        for ext in ['svg', 'pdf', ['png', 600]]:
-            if isinstance(ext, list):
-                ext, dpi = ext
-                fig.savefig(fig_fdn+'immune_tsne_timepoint.{:}'.format(
-                    ext),
-                    dpi=dpi)
-            else:
-                fig.savefig(fig_fdn+'immune_tsne_timepoint.{:}'.format(
-                    ext))
+        print('Find initial cell, e.g. highest cell cycle')
+        stem = vs.loc[(ds.samplesheet['Timepoint'] == 'E18.5') & (vs['dimension 2'] > 2), 'dimension 1'].idxmin()
+        stem_idx = ds.samplenames.tolist().index(stem)
+
+        print('Perform a bunch of operations before pseudotime')
+        adata.uns['iroot'] = stem_idx
+        scanpy.pp.neighbors(
+                adata,
+                n_neighbors=15,
+                n_pcs=0,
+                use_rep='X',
+                knn=True,
+                random_state=0,
+                method='umap',
+                metric='correlation',
+                metric_kwds={},
+                copy=False,
+                )
+        scanpy.tl.diffmap(
+                adata,
+                n_comps=15,
+                copy=False,
+                )
+
+        print('Compute pseudotime')
+        scanpy.tl.dpt(
+                adata,
+                n_dcs=10,
+                n_branchings=0,
+                min_group_size=0.01,
+                allow_kendall_tau_shift=True,
+                copy=False,
+                )
+        ds.samplesheet['pseudotime'] = adata.obs['dpt_pseudotime']
+
+        ds.samplesheet[['pseudotime']].to_csv(fn_pt, sep='\t', index=True, header=True)
+        vs.to_csv(fn_tsne, sep='\t', index=True, header=True)
+
+    vs = pd.read_csv(fn_tsne, sep='\t', index_col=0)
+    pt = pd.read_csv(fn_pt, sep='\t', index_col=0, squeeze=True)
+    pt = pt.loc[ds.samplenames]
+    ds.samplesheet['pseudotime'] = pt
+    stem = vs.loc[(ds.samplesheet['Timepoint'] == 'E18.5') & (vs['dimension 2'] > 2), 'dimension 1'].idxmin()
+    stem_idx = ds.samplenames.tolist().index(stem)
 
     if True:
-        print('Plot tsne with genes')
-        genes = ['Itgae', 'Mreg', 'Cd209a', 'Zbtb46', 'Flt3', 'Itgax',
-                 'Cacnb3', 'Fscn1', 'Ccl5', 'Ccr7']
-        fig, axs = plt.subplots(2, 5, figsize=(8.5, 4))
-        axs = axs.ravel()
-        for ax, gene in zip(axs, genes):
+        print('Plot tSNE with pseudotime')
+        fig, axs = plt.subplots(1, 7, figsize=(17, 2.5))
+        for ax, gene in zip(axs, ['Ccr1', 'Ccr2', 'Treml4', 'Ace', 'Slc12a2', 'Timepoint', 'pseudotime']):
+            if gene == 'pseudotime':
+                cmap = 'viridis'
+            elif gene == 'Timepoint':
+                cmap = {
+                    'E18.5': 'navy',
+                    'P1': 'gold',
+                    'P7': 'tomato',
+                    'P21': 'firebrick',
+                    }
+            else:
+                cmap = 'viridis'
             ds.plot.scatter_reduced_samples(
                     vs,
                     ax=ax,
                     s=12,
-                    alpha=0.50,
-                    cmap='viridis',
+                    alpha=0.30,
+                    cmap=cmap,
                     color_by=gene,
-                    color_log=True,
+                    color_log=(gene not in ('pseudotime', 'Timepoint')),
                     )
+            ax.scatter(
+                [vs.at[stem, 'dimension 1']], [vs.at[stem, 'dimension 2']],
+                s=200,
+                marker='*',
+                edgecolor='k',
+                facecolor='none',
+                lw=2,
+                )
             ax.grid(False)
-            ax.set_title(gene)
             ax.set_axis_off()
-        fig.tight_layout()
+            ax.set_title(gene.capitalize())
 
-    if True:
-        for ext in ['svg', 'pdf', ['png', 600]]:
-            if isinstance(ext, list):
-                ext, dpi = ext
-                fig.savefig(fig_fdn+'immune_tsne_genes_DCs.{:}'.format(
-                    ext),
-                    dpi=dpi)
-            else:
-                fig.savefig(fig_fdn+'immune_tsne_genes_DCs.{:}'.format(
-                    ext))
-
-    if True:
-        print('Plot cell type abundances')
-        ctms = ['DC I', 'DC II', 'DC III']
-        df0 = ds0.samplesheet[['Timepoint', 'cellSubtype', 'Gender']].copy()
-        df0['c'] = 1
-        frac0 = df0.groupby(['Timepoint', 'cellSubtype']).count()['c'].unstack().fillna(0).astype(np.float64).T
-        frac0 *= 100 / frac0.sum(axis=0)
-        frac0 = frac0.loc[ctms]
-
-        df = ds.samplesheet[['Timepoint', 'cellSubtype', 'Gender']].copy()
-        df['c'] = 1
-        frac = df.groupby(['Timepoint', 'cellSubtype']).count()['c'].unstack().fillna(0).astype(np.float64).T
-        frac *= 100 / frac.sum(axis=0)
-
-        df = ds.samplesheet[['Timepoint', 'cellSubtype', 'Gender']].copy()
-        df['c'] = 1
-        numb = df.groupby(['Timepoint', 'cellSubtype']).count()['c'].unstack().fillna(0).astype(np.int64).T
-
-        colors = sns.color_palette('muted', n_colors=5)
-        cmap = {
-            'DC I': colors[0],
-            'DC II': colors[1],
-            'DC III': colors[2],
-            }
-
-        print('Plot fraction trajectories')
-        from scipy import interpolate
-        fig = plt.figure(figsize=(11, 3))
-        axs = []
-        axs.append(fig.add_subplot(1, 3, 1))
-        axs.append(fig.add_subplot(1, 3, 2, sharex=axs[0], sharey=axs[0]))
-        axs.append(fig.add_subplot(1, 3, 3))
-        sts = frac.index.tolist()
-        if '' in sts:
-            sts.remove('')
-        x = np.arange(4)
-        xorder = ['E18.5', 'P1', 'P7', 'P21']
-        for iax, (ax, fraci) in enumerate(zip(axs, [frac0, frac, numb])):
-            for ist, st in enumerate(sts):
-                y = fraci.loc[st, xorder]
-
-                outx = np.linspace(0, 3, 100)
-                outy = 10**interpolate.pchip_interpolate(x, np.log10(0.1 + y), outx) - 0.1
-                out = np.vstack([outx, outy])
-                m = ['o', 's', '^', 'd', 'v'][ist]
-
-                ax.scatter(
-                        x, y + 0.1,
-                        marker=m,
-                        lw=2, alpha=0.8,
-                        edgecolor=cmap[st],
-                        facecolor='none',
-                        label=st,
-                        zorder=10 - ist,
-                        )
-                ax.plot(out[0], out[1] + 0.1, lw=2,
-                        alpha=0.4,
-                        color=cmap[st],
-                        zorder=10 - ist,
-                        )
-            ax.grid(True)
-            ax.set_xticks(x)
-            ax.set_xticklabels(xorder)
-            ax.set_ylim(0.1, 101)
-            ax.set_yscale('log')
-            ax.set_yticks([0.1, 1, 10, 100])
-            if iax == 0:
-                ax.set_title('Percentage of\nimmune cells')
-            elif iax == 1:
-                ax.set_title('Percentage of\nDCs')
-            else:
-                ax.set_title('Number of\nDCs')
-                ax.legend(title='Subtype:', bbox_to_anchor=(1.04, 1.02), loc="upper left", fontsize=9)
-        axs[0].set_yticklabels(['0.1%', '1%', '10%', '100%'])
-        axs[-1].set_yticklabels(['0', '1', '10', '100'])
-
-        fig.tight_layout()
-
-    if False:
-        for ext in ['svg', 'pdf', ['png', 600]]:
-            if isinstance(ext, list):
-                ext, dpi = ext
-                fig.savefig(fig_fdn+'DC_population_abundances.{:}'.format(
-                    ext),
-                    dpi=dpi)
-            else:
-                fig.savefig(fig_fdn+'DC_population_abundances.{:}'.format(
-                    ext))
-
-    print('Granulocytes')
-    ds = ds0.query_samples_by_metadata(
-        'cellSubtype in ("basophil", "mast cell", "neutrophil")',
-        )
-
-    print('Load tSNE from file')
-    vs = pd.read_csv(
-        '../../data/sequencing/datasets/all_20190828/tsne_immune.tsv',
-        sep='\t',
-        index_col=0,
-        )
-    vs = vs.loc[ds.samplenames]
-
-    if True:
-        print('Plot tSNE with clusters')
-        gene, title = ('cellSubtype', 'subtype')
-        ln = ds.samplesheet[gene].str.len().max()
-
-        fig, ax = plt.subplots(figsize=(2 + 0.07 * ln, 2))
-        cmap = {
-            'mast cell': 'gold',
-            'basophil': 'grey',
-            'neutrophil': 'black',
-        }
-        ds.plot.scatter_reduced_samples(
-                vs,
-                ax=ax,
-                s=12,
-                alpha=0.40,
-                cmap=cmap,
-                color_by=gene,
-                color_log=False,
+        pt = ds.samplesheet['pseudotime']
+        times = np.linspace(0, 1, 6)
+        traj = []
+        for it in range(len(times) - 1):
+            ind = (pt >= times[it])
+            if it != len(times) - 1:
+                ind &= (pt < times[it + 1])
+            if ind.sum() == 0:
+                continue
+            xm, ym = vs.loc[ind].mean(axis=0)
+            tm = 0.5 * (times[it] + times[it + 1])
+            traj.append({
+                'pseudotime': tm,
+                'x': xm,
+                'y': ym,
+                })
+        traj = pd.DataFrame(traj)
+        traj.sort_values('pseudotime', inplace=True)
+        if len(traj) > 2:
+            ax.plot(
+                traj['x'].values[:-1], traj['y'].values[:-1],
+                lw=2, color='k',
+                )
+        if len(traj) >= 2:
+            xi = traj['x'].values[-2]
+            yi = traj['y'].values[-2]
+            dx = traj['x'].values[-1] - xi
+            dy = traj['y'].values[-1] - yi
+            ax.arrow(
+                xi, yi, dx, dy,
+                color='k',
+                lw=2,
+                length_includes_head=True,
+                head_width=4,
                 )
 
-        d = ax._singlet_cmap
-        handles = []
-        labels = []
-        for key, color in d.items():
-            h = mlines.Line2D(
-                [], [], color=color, marker='o', lw=0,
-                markersize=5,
-                )
-            handles.append(h)
-            if gene == 'Treatment':
-                key = key[0]
-            labels.append(key.upper())
-        ncol = 1
-        fontsize = 8
-        ax.legend(
-            handles, labels, loc='upper left', fontsize=fontsize, ncol=ncol,
-            bbox_to_anchor=(1.01, 1.01),
-            bbox_transform=ax.transAxes,
-            )
-
-        ax.grid(False)
-        ax.set_axis_off()
-        fig.tight_layout()
-
-    if True:
-        for ext in ['svg', 'pdf', ['png', 600]]:
-            if isinstance(ext, list):
-                ext, dpi = ext
-                fig.savefig(fig_fdn+'immune_tsne_clusters_granulocytes.{:}'.format(
-                    ext),
-                    dpi=dpi)
-            else:
-                fig.savefig(fig_fdn+'immune_tsne_clusters_granulocytes.{:}'.format(
-                    ext))
-
-
-    if True:
-        print('Plot tSNE with genes')
-        genes = [
-            'Mcpt4', 'Mcpt8', 'Il6', 'Ccl4', 'Hgf', 'Osm',
-            'Stfa1', 'Stfa2', 'Retnlg', 'S100a9', 'S100a8',
+        # Legend for pseudotime
+        labels = ['0', '0.25', '0.5', '0.75', '1']
+        sfun = plt.cm.get_cmap('viridis')
+        handles = [
+            axs[-1].scatter([], [], marker='s', s=50, color=sfun(0)),
+            axs[-1].scatter([], [], marker='s', s=50, color=sfun(0.25)),
+            axs[-1].scatter([], [], marker='s', s=50, color=sfun(0.50)),
+            axs[-1].scatter([], [], marker='s', s=50, color=sfun(0.75)),
+            axs[-1].scatter([], [], marker='s', s=50, color=sfun(1.0)),
             ]
-        for gene in genes:
-            fig, ax = plt.subplots(figsize=(2, 2))
-            ds.plot.scatter_reduced_samples(
-                    vs,
-                    ax=ax,
-                    s=12,
-                    alpha=0.40,
-                    cmap='viridis',
-                    color_by=gene,
-                    color_log=True,
-                    )
-            ax.grid(False)
-            ax.set_title(gene)
-            ax.set_axis_off()
-            fig.tight_layout()
+        leg = axs[-1].legend(
+                handles, labels,
+                title='Pseudotime:',
+                bbox_to_anchor=(1.08, 0.99),
+                loc='upper left',
+                )
 
-            if True:
-                for ext in ['svg', 'pdf', ['png', 600]]:
-                    if isinstance(ext, list):
-                        ext, dpi = ext
-                        fig.savefig(fig_fdn+'immune_tsne_clusters_granulocytes_{:}.{:}'.format(
-                            gene, ext),
-                            dpi=dpi)
-                    else:
-                        fig.savefig(fig_fdn+'immune_tsne_clusters_granulocytes{:}.{:}'.format(
-                            gene, ext))
+        fig.tight_layout()
+
+    if True:
+        for ext in ['svg', 'pdf', ['png', 600]]:
+            if isinstance(ext, list):
+                ext, dpi = ext
+                fig.savefig(fig_fdn+'MacV_tsne_pseudotime.{:}'.format(
+                    ext),
+                    dpi=dpi)
+            else:
+                fig.savefig(fig_fdn+'MacV_tsne_pseudotime.{:}'.format(
+                    ext))
+
+    if True:
+        print('Plot heatmap with single genes and pseudotime bins')
+        pt_bins = [
+            [0, 0.225],
+            [0.175, 0.425],
+            [0.375, 0.625],
+            [0.575, 0.825],
+            [0.775, 1.01],
+            ]
+
+        genes = [
+            'Ear2',
+            'Treml4',
+            'Cd9',
+            'Lair1',
+            'Ace',
+            'Eno3',
+            'Cd36',
+            'Ccr1',
+            'Sell',
+            'Vcan',
+            'Gas7',
+            'Ly6c2',
+            'Fn1',
+            'Ccr2',
+            'Ifitm6',
+            'Cd68',
+            'Plac8',
+            'Ptprc',
+            ]
+        data = pd.DataFrame([], index=genes)
+        for (bl, br) in pt_bins:
+            dsi = ds.query_samples_by_metadata(
+                '(pseudotime >= @bl) & (pseudotime < @br)',
+                local_dict=locals(),
+                )
+            mat = np.log10(0.1 + dsi.counts.loc[genes]).mean(axis=1)
+            data[(bl, br)] = mat
+
+        # Normalize by max expression of that gene
+        data += 1
+        data = (data.T / data.max(axis=1)).T
+
+        fig, ax = plt.subplots(figsize=(8, 3))
+        sns.heatmap(
+            data.T,
+            ax=ax,
+            cmap='plasma',
+            vmin=0,
+            vmax=1,
+            fmt='.1f',
+            xticklabels=True,
+            yticklabels=True,
+            cbar=False,
+            )
+        ax.yaxis.set_label_position("right")
+        ax.yaxis.tick_right()
+        ax.set_yticklabels([])
+        ax.set_yticks([])
+        ax.set_ylabel('Pseudotime', rotation=270, labelpad=30)
+        ax.arrow(
+                1.023, 0.8, 0, -0.6, color='k', lw=1.5,
+                head_width=0.02,
+                head_length=0.08,
+                clip_on=False,
+                transform=ax.transAxes,
+                )
+        for tk in ax.get_xticklabels():
+            tk.set_rotation(90)
+        ax.set_xlim(0, len(genes))
+        ax.set_ylim(len(pt_bins), 0)
+        fig.tight_layout()
+
+    if True:
+        for ext in ['svg', 'pdf', ['png', 600]]:
+            if isinstance(ext, list):
+                ext, dpi = ext
+                fig.savefig(fig_fdn+'MacV_heatmap_singlegenes_pseudotime.{:}'.format(
+                    ext),
+                    dpi=dpi)
+            else:
+                fig.savefig(fig_fdn+'MacV_heatmap_singlegenes_pseudotime.{:}'.format(
+                    ext))
+
+    if True:
+        print('Plot heatmap with pathways and pseudotime bins')
+        pt_bins = [
+            [0, 0.225],
+            [0.175, 0.425],
+            [0.375, 0.625],
+            [0.575, 0.825],
+            [0.775, 1.01],
+            ]
+
+        pathways = [
+            ('cytoskeleton', ['Actb', 'Vim', 'Dstn', 'Rap2b', 'Ckap4']),
+            ('matrix\nremodeling', ['S100a10', 'Fn1', 'F13a1', 'Vcan', 'Mmp8']),
+            ('reduction\noxidation', ['Sod1', 'Prdx6', 'Glrx']),
+            ('chemotaxis', ['Ccr2', 'Ly6c1', 'Ccr1']),
+            ('macrophage\ndifferentiation', ['Csf1r', 'Spn', 'Cd300e']),
+            ('alternative\nactivation', ['Fn1', 'Tgm2', 'Cd36']),
+            ('neg reg of\ninflammation', ['Ceacam1', 'Dusp5', 'Ear2', 'Cd274']),
+            ('innate\nimmunity', ['Pglyrp1', 'Cd300ld', 'Treml4', 'Slc12a2', 'Ace']),
+            ]
+        genes = sum((x[1] for x in pathways), [])
+
+        data = pd.DataFrame([], index=genes)
+        for (bl, br) in pt_bins:
+            dsi = ds.query_samples_by_metadata(
+                '(pseudotime >= @bl) & (pseudotime < @br)',
+                local_dict=locals(),
+                )
+            mat = np.log10(0.1 + dsi.counts.loc[genes]).mean(axis=1)
+            data[(bl, br)] = mat
+
+        # Normalize by max expression of that gene
+        data += 1
+        data = (data.T / data.max(axis=1)).T
+
+        fig, axs = plt.subplots(
+                2, 1, figsize=(8, 4), sharex=True,
+                gridspec_kw={'height_ratios': [1, 20]})
+        sns.heatmap(
+            data.T,
+            ax=axs[1],
+            cmap='plasma',
+            vmin=0,
+            vmax=1,
+            fmt='.1f',
+            xticklabels=True,
+            yticklabels=True,
+            cbar=False,
+            )
+        i = 0
+        for ipw, (pw, gns) in enumerate(pathways):
+            if i != 0:
+                axs[1].plot([i] * 2, [0, len(genes)], lw=2, color='lightgrey', alpha=0.9)
+            i += len(gns)
+
+        axs[1].yaxis.set_label_position("right")
+        axs[1].yaxis.tick_right()
+        axs[1].set_yticklabels([])
+        axs[1].set_yticks([])
+        axs[1].set_ylabel('Pseudotime', rotation=270, labelpad=28)
+        axs[1].arrow(
+                len(genes) + 0.8, 1, 0, 0.6 * len(pt_bins), color='k', lw=1.5,
+                head_width=0.4,
+                head_length=0.6,
+                clip_on=False,
+                )
+        for tk in axs[1].get_xticklabels():
+            tk.set_rotation(90)
+        axs[1].set_xlim(0, len(genes))
+        axs[1].set_ylim(len(pt_bins), 0)
+
+        # Legend
+        labels = ['none', 'low', 'mid', 'high']
+        sfun = plt.cm.get_cmap('plasma')
+        handles = [
+            axs[1].scatter([], [], marker='s', s=50, color=sfun(0)),
+            axs[1].scatter([], [], marker='s', s=50, color=sfun(0.33)),
+            axs[1].scatter([], [], marker='s', s=50, color=sfun(0.67)),
+            axs[1].scatter([], [], marker='s', s=50, color=sfun(1.0)),
+            ]
+        leg = axs[1].legend(
+                handles, labels,
+                title='Gene\nexpression:',
+                bbox_to_anchor=(1.08, 0.99),
+                loc='upper left',
+                )
+
+        axs[0].set_ylim(0, 1)
+        axs[0].set_xlim(0, len(genes))
+        color_d = dict(zip(
+            (x[0] for x in pathways),
+            sns.color_palette('muted', n_colors=len(pathways)),
+            ))
+        i = 0
+        for ipw, (pw, gns) in enumerate(pathways):
+            w = len(gns)
+            rect = plt.Rectangle(
+                    (i, 0), w, 1,
+                    facecolor=color_d[pw],
+                    edgecolor='none',
+                    lw=0,
+                    )
+            axs[0].add_artist(rect)
+
+            wt = i + 0.5 * w + 0.15 * w * (pw == '')
+            ht = 2 + 1.5 * (ipw % 2) + 1.9 * (pw in ['chemotaxis', 'alternative\nactivation'])
+            axs[0].text(
+                    wt, ht, pw, ha='center', va='bottom',
+                    fontsize=10,
+                    clip_on=False,
+                    )
+
+            if ipw % 2:
+                axs[0].plot(
+                        [wt] * 2, [ht - 0.2, 1.2], lw=1, color='k',
+                        clip_on=False,
+                        )
+
+            i += w
+        axs[0].set_axis_off()
+        fig.tight_layout(h_pad=0.01)
+
+    if True:
+        for ext in ['svg', 'pdf', ['png', 600]]:
+            if isinstance(ext, list):
+                ext, dpi = ext
+                fig.savefig(fig_fdn+'MacV_heatmap_pathways_pseudotime.{:}'.format(
+                    ext),
+                    dpi=dpi)
+            else:
+                fig.savefig(fig_fdn+'MacV_heatmap_pathways_pseudotime.{:}'.format(
+                    ext))
+
+
 
     plt.ion()
     plt.show()
