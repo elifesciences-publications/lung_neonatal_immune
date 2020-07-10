@@ -9,3 +9,5 @@ To keep an eye on what we do: http://fabilab.org.
 - `supplementary` contains the scripts used to make various supplementary figures
 
 Of course, contact Fabio Zanini or open an issue on this repository for access to more data or scripts.
+
+This code is associated with the paper from Domingo-Gonzalez et al., "Diverse homeostatic and immunomodulatory roles of immune cells in the developing mouse lung at single cell resolution". eLife, 2020. http://doi.org/10.7554/eLife.56890
